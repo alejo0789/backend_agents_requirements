@@ -1,0 +1,23 @@
+task_requirements_interpretation:
+  description: >
+    Conduct a detailed requirement gathering session with the developer to understand 
+    their app idea and create a comprehensive masterplan document.
+    The developer has an initial concept for an application but needs help formalizing 
+    the requirements and creating a structured plan. Through a conversational approach, 
+    you'll extract, organize, and document their vision into an actionable blueprint.
+      1. Begin the conversation by introducing yourself and explaining your process.
+    2. Ask specific, targeted questions about the application concept, starting with 
+       high-level questions about purpose and target users before moving to specifics.
+    3. Explore core functionality, user interactions, data requirements, technical needs, 
+       and potential challenges through structured questioning.
+    4. Document key requirements as they emerge in the conversation.
+    5. After gathering sufficient information, inform the developer you'll create a masterplan.
+    6. Generate a comprehensive masterplan.md document following the structure in your instructions.
+    7. Present the masterplan to the developer and request feedback.
+    8. Make any necessary adjustments based on feedback.
+
+  expected_output: >
+    A comprehensive masterplan.md document that outlines the application blueprint including 
+    app overview, target audience, core features, technical recommendations, data model, 
+    UI/UX principles, security considerations, development phases, potential challenges, 
+    and future expansion possibilities.

@@ -27,7 +27,27 @@ load_dotenv()
 app = Flask(__name__)
 
 # Configure CORS to allow requests from your frontend
-CORS(app, supports_credentials=True, origins=['http://localhost:3000', 'https://agnets-requirements-pib3.vercel.app'])
+CORS(app, 
+     supports_credentials=True, 
+     origins=['http://localhost:3000', 'https://agnets-requirements-pib3.vercel.app'],
+     methods=['GET', 'POST', 'OPTIONS'],  # Explicitly state allowed methods
+     allow_headers=['Content-Type', 'Authorization'],  # Allow necessary headers
+     max_age=3600  # Cache preflight requests for 1 hour
+)
+@app.after_request
+def add_cors_headers(response):
+    # Ensure your production domain is in the allowed origins
+    frontend_url = 'https://agnets-requirements-pib3.vercel.app'
+    origin = request.headers.get('Origin')
+    
+    # If the request came from your frontend
+    if origin and (origin == frontend_url or origin == 'http://localhost:3000'):
+        response.headers.add('Access-Control-Allow-Origin', origin)
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+        response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
+        response.headers.add('Access-Control-Allow-Credentials', 'true')
+    
+    return response
 
 app.secret_key = os.environ.get("SECRET_KEY", "123454")
 
@@ -45,7 +65,7 @@ SYSTEM_PROMPT = """You are a professional software developer who is very friendl
 
 Throughout the conversation, your goal is to understand the user's app idea and its requirements so you can eventually create a masterplan document. be fun and ask friendly questions in list markdown format <li> but no more than 2 or 3 that help you understand the app's purpose, target audience, functionality, and technical requirements.
 
-After you feel you have gathered sufficient information about the app (usually after 5-6 messages exchanged), proactively offer to create a masterplan. For example, you might say:
+After you feel you have gathered sufficient information about the app (usually after 5 messages exchanged), proactively offer to create a masterplan. For example, you might say:
 
 "I think I've got a good understanding of your app idea now. Would you like me to generate a comprehensive masterplan document based on our discussion?"
 

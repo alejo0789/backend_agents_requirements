@@ -1,10 +1,21 @@
 {
-    "version": 2,
-    "builds": [{ "src": "app.py", "use": "@vercel/python" }],
-    "routes": [
-      {
-        "src": "/(.*)",
-        "dest": "app.py"
+  "version": 2,
+  "builds": [
+    {
+      "src": "app.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "app.py",
+      "headers": {
+        "Access-Control-Allow-Origin": "https://agnets-requirements-pib3.vercel.app",
+        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        "Access-Control-Allow-Credentials": "true"
       }
-    ]
-  }
+    }
+  ]
+}

@@ -133,7 +133,7 @@ def save_drawing_image(base64_image, user_id="user"):
         logger.info(f"Drawing image saved to {filepath}")
         return filepath
     except Exception as e:
-        logger.error(f"Error saving drawing image: {str(e)}")
+        logger.error(f"Error saving drawing imag: {str(e)}")
         return None
 
 @app.route('/chat', methods=['POST'])

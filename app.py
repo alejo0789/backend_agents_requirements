@@ -14,7 +14,7 @@ from PIL import Image
 import anthropic
 from anthropic.types import ContentBlock, MessageParam
 from datetime import datetime
-
+from datetime import datetime, timedelta
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -25,6 +25,20 @@ logger = logging.getLogger(__name__)
 # Load environment variables first, before any other code
 load_dotenv()
 app = Flask(__name__)
+
+# Add session configuration for cross-domain cookies
+
+app.config.update(
+    SESSION_COOKIE_SAMESITE='None',  # Allows cross-domain cookies
+    SESSION_COOKIE_SECURE=True,      # For HTTPS connections
+    SESSION_COOKIE_HTTPONLY=True     # Prevents JavaScript access to the cookie
+)
+
+# Make all sessions permanent by default
+@app.before_request
+def make_session_permanent():
+    session.permanent = True
+    app.permanent_session_lifetime = timedelta(hours=24)
 
 # Configure CORS to allow requests from your frontend
 CORS(app, 

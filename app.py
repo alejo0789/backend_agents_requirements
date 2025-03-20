@@ -155,7 +155,7 @@ def chat():
             
             # Add information about the image to the message
             if image_path:
-                user_message = f"{user_message}\n\n[User has provided a sketch drawing of the interface]"
+                user_message = f"{user_message}\n\n[User has provided sketch drawing of the interface]"
         
         # Initialize conversation history if it doesn't exist
         if 'messages' not in session:

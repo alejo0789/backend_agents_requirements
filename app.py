@@ -27,7 +27,7 @@ load_dotenv()
 app = Flask(__name__)
 
 # Configure CORS to allow requests from your frontend
-CORS(app, supports_credentials=True, origins=['http://localhost:3000'])
+CORS(app, supports_credentials=True, origins=['http://localhost:3000', 'https://agnets-requirements-pib3.vercel.app/'])
 
 app.secret_key = os.environ.get("SECRET_KEY", "123454")
 

@@ -1,6 +1,7 @@
 import os
 import base64
 import logging
+import anthropic
 from datetime import datetime
 from jobs import JobManager
 
@@ -12,8 +13,6 @@ class ClaudeService:
         if not self.api_key:
             logger.warning("CLAUDE_API_KEY not set in environment variables")
         else:
-            # Import here to avoid requiring the package when not configured
-            import anthropic
             self.client = anthropic.Anthropic(api_key=self.api_key)
     
     def is_configured(self):
@@ -26,9 +25,6 @@ class ClaudeService:
             return "Claude API is not configured. Please set the CLAUDE_API_KEY environment variable."
         
         try:
-            # Import here to ensure the module is imported only when needed
-            import anthropic
-            
             # Read the image file and encode it as base64
             with open(image_path, "rb") as image_file:
                 image_data = base64.b64encode(image_file.read()).decode('utf-8')
@@ -96,9 +92,6 @@ class ClaudeService:
             return
         
         try:
-            # Import here to ensure the module is imported only when needed
-            import anthropic
-            
             # Update job status to show we're starting the process
             JobManager.save_job_status(job_id, {
                 'status': 'processing',
@@ -122,48 +115,55 @@ class ClaudeService:
                 then provide the visual representation using SVG."""
             })
             
-            # Add sketch images if provided
-            for i, base64_image in enumerate(sketch_images):
-                try:
-                    image_content.append({
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "image/png",
-                            "data": base64_image
-                        }
-                    })
-                    
-                    # Add a description after each image
-                    image_content.append({
-                        "type": "text",
-                        "text": f"This is user sketch #{i+1}. Please consider this sketch when designing the mockups."
-                    })
-                except Exception as e:
-                    logger.error(f"Error adding sketch image {i} to Claude request: {str(e)}")
-            
             # Update progress
             JobManager.save_job_status(job_id, {
                 'status': 'processing',
                 'progress': 30,
-                'message': f'Calling Claude API to generate mockups with {len(sketch_images)} sketch images...',
+                'message': f'Calling Claude API to generate mockups with {len(sketch_images) if sketch_images else 0} sketch images...',
                 'mockups': [],
                 'completed': False
             })
             
+            # Add sketch images if provided
+            if sketch_images and len(sketch_images) > 0:
+                logger.info(f"Processing {len(sketch_images)} sketch images")
+                for i, base64_image in enumerate(sketch_images):
+                    try:
+                        if base64_image:  # Make sure it's not None or empty
+                            image_content.append({
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": "image/png",
+                                    "data": base64_image
+                                }
+                            })
+                            
+                            # Add a description after each image
+                            image_content.append({
+                                "type": "text",
+                                "text": f"This is user sketch #{i+1}. Please consider this sketch when designing the mockups."
+                            })
+                    except Exception as e:
+                        logger.error(f"Error adding sketch image {i} to Claude request: {str(e)}")
+            
             # Create the message using Anthropic client
-            message = self.client.messages.create(
-                model="claude-3-7-sonnet-20250219",
-                max_tokens=5000,
-                temperature=0.7,
-                system="You are a professional UI/UX designer. Create detailed UI/UX mockups as SVG, be sure to gather and use the correct key aspects of the masterplan, the mockups must be intuitive, and user friendly, be sure that SVG replaces all escaped newlines (\\n) with actual line breaks.",
-                messages=[
-                    {
-                        "role": "user", 
-                        "content": image_content
-                    }
-                ]
-            )
+            try:
+                message = self.client.messages.create(
+                    model="claude-3-7-sonnet-20250219",
+                    max_tokens=5000,
+                    temperature=0.7,
+                    system="You are a professional UI/UX designer. Create detailed UI/UX mockups as SVG, be sure to gather and use the correct key aspects of the masterplan, the mockups must be intuitive, and user friendly, be sure that SVG replaces all escaped newlines (\\n) with actual line breaks.",
+                    messages=[
+                        {
+                            "role": "user", 
+                            "content": image_content
+                        }
+                    ]
+                )
+            except Exception as api_error:
+                logger.error(f"Claude API error in mockup generation: {str(api_error)}", exc_info=True)
+                raise Exception(f"API error: {str(api_error)}")
             
             # Process the response
             mockup_data = []
@@ -182,7 +182,7 @@ class ClaudeService:
                         'type': 'text',
                         'content': content_block.text
                     })
-                elif content_block.type == "image" and getattr(content_block, "source", {}).get("type") == "svg":
+                elif content_block.type == "image" and getattr(content_block.source, "type", None) == "svg":
                     mockup_data.append({
                         'type': 'svg',
                         'content': content_block.source.data
@@ -219,9 +219,6 @@ class ClaudeService:
             return
         
         try:
-            # Import here to ensure the module is imported only when needed
-            import anthropic
-            
             # Update job status to show we're starting the process
             JobManager.save_job_status(job_id, {
                 'status': 'processing',
@@ -272,23 +269,27 @@ Each diagram should be accompanied by explanatory text."""
             })
             
             # Call the Claude API
-            message = self.client.messages.create(
-                model="claude-3-7-sonnet-20250219",
-                max_tokens=5000,
-                temperature=0.7,
-                system=system_prompt,
-                messages=[
-                    {
-                        "role": "user", 
-                        "content": [
-                            {
-                                "type": "text", 
-                                "text": text_content
-                            }
-                        ]
-                    }
-                ]
-            )
+            try:
+                message = self.client.messages.create(
+                    model="claude-3-7-sonnet-20250219",
+                    max_tokens=5000,
+                    temperature=0.7,
+                    system=system_prompt,
+                    messages=[
+                        {
+                            "role": "user", 
+                            "content": [
+                                {
+                                    "type": "text", 
+                                    "text": text_content
+                                }
+                            ]
+                        }
+                    ]
+                )
+            except Exception as api_error:
+                logger.error(f"Claude API error in architecture generation: {str(api_error)}", exc_info=True)
+                raise Exception(f"API error: {str(api_error)}")
             
             # Process the response
             diagram_data = []
@@ -308,7 +309,7 @@ Each diagram should be accompanied by explanatory text."""
                         'content': content_block.text
                     })
                 # Handle SVG content if present
-                elif content_block.type == "image" and getattr(content_block, "source", {}).get("type") == "svg":
+                elif content_block.type == "image" and getattr(content_block.source, "type", None) == "svg":
                     diagram_data.append({
                         'type': 'svg',
                         'content': content_block.source.data

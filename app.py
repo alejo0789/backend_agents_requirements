@@ -5,16 +5,15 @@ import os
 from dotenv import load_dotenv
 import re
 import logging
-import requests
-import json
-from flask import send_file
 import base64
-from io import BytesIO
-from PIL import Image
-import anthropic
-from anthropic.types import ContentBlock, MessageParam
-from datetime import datetime
 from datetime import datetime, timedelta
+import threading
+import time
+import uuid
+# Import our custom modules
+from jobs import JobManager
+from claude_service import ClaudeService
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -27,11 +26,13 @@ load_dotenv()
 app = Flask(__name__)
 
 # Add session configuration for cross-domain cookies
-
 app.config.update(
-    SESSION_COOKIE_SAMESITE='None',  # Allows cross-domain cookies
-    SESSION_COOKIE_SECURE=True,      # For HTTPS connections
-    SESSION_COOKIE_HTTPONLY=True     # Prevents JavaScript access to the cookie
+    SESSION_COOKIE_SAMESITE='None',     # Allows cross-domain cookies
+    SESSION_COOKIE_SECURE=True,         # For HTTPS connections
+    SESSION_COOKIE_HTTPONLY=True,       # Prevents JavaScript access to the cookie
+    SESSION_TYPE='filesystem',          # Use filesystem instead of signing cookies
+    SESSION_PERMANENT=True,             # Make sessions persistent
+    PERMANENT_SESSION_LIFETIME=timedelta(hours=24)  # Set session lifetime
 )
 
 # Make all sessions permanent by default
@@ -39,6 +40,12 @@ app.config.update(
 def make_session_permanent():
     session.permanent = True
     app.permanent_session_lifetime = timedelta(hours=24)
+    
+    # Debug session information
+    if request.endpoint != 'static':
+        logger.info(f"Session ID: {session.get('session_id', 'None')}")
+        logger.info(f"Request path: {request.path}")
+        logger.info(f"Session contains messages: {'messages' in session}")
 
 # Configure CORS to allow requests from your frontend
 CORS(app, 
@@ -48,6 +55,7 @@ CORS(app,
      allow_headers=['Content-Type', 'Authorization'],  # Allow necessary headers
      max_age=3600  # Cache preflight requests for 1 hour
 )
+
 @app.after_request
 def add_cors_headers(response):
     # Ensure your production domain is in the allowed origins
@@ -63,7 +71,8 @@ def add_cors_headers(response):
     
     return response
 
-app.secret_key = os.environ.get("SECRET_KEY", "123454")
+# Set a strong secret key
+app.secret_key = os.environ.get("SECRET_KEY", os.urandom(24))
 
 # Using Gemini 1.5 Pro for better context handling
 GEMINI_MODEL = "models/gemini-1.5-pro" 
@@ -73,6 +82,11 @@ if not my_api_key:
     logger.warning("GOOGLE_API_KEY environment variable not set!")
 
 genai.configure(api_key=my_api_key)
+
+# Initialize Claude service
+claude_service = ClaudeService()
+if not claude_service.is_configured():
+    logger.warning("Claude API service is not configured. Some features will be unavailable.")
 
 # System message to set the agent's context and behavior
 SYSTEM_PROMPT = """You are a professional software developer who is very friendly and supportive, helping a user plan their app idea. Your primary goal is to gather information from the user about their app concept and gradually develop a comprehensive masterplan document.
@@ -167,7 +181,7 @@ def save_drawing_image(base64_image, user_id="user"):
         logger.info(f"Drawing image saved to {filepath}")
         return filepath
     except Exception as e:
-        logger.error(f"Error saving drawing imag: {str(e)}")
+        logger.error(f"Error saving drawing image: {str(e)}")
         return None
 
 @app.route('/chat', methods=['POST'])
@@ -181,11 +195,16 @@ def chat():
         
         logger.info(f"Received message for {agent_type} agent: {user_message[:50]}...")
         
+        # First-time session setup check
+        if 'session_id' not in session:
+            session['session_id'] = str(uuid.uuid4())
+            logger.info(f"Created new session with ID: {session['session_id']}")
+        
         # Save the drawing image if provided
         image_path = None
         if drawing_image:
             logger.info("Drawing image received")
-            image_path = save_drawing_image(drawing_image)
+            image_path = save_drawing_image(drawing_image, session.get('session_id', 'user'))
             
             # Add information about the image to the message
             if image_path:
@@ -195,11 +214,17 @@ def chat():
         if 'messages' not in session:
             session['messages'] = []
             session['messages_count'] = 0
-            logger.info("Creating new session")
+            session['first_message'] = True
+            logger.info("Initializing message history in session")
         
         # Add the current message to the conversation history
-        session['messages'].append(user_message)
+        messages = session.get('messages', [])
+        messages.append(user_message)
+        session['messages'] = messages
         session['messages_count'] = session.get('messages_count', 0) + 1
+        
+        # Ensure the session is saved
+        session.modified = True
         
         # Track conversation length to determine if it's time to suggest a masterplan
         conversation_length = session.get('messages_count', 0)
@@ -233,19 +258,37 @@ def chat():
             """
             session['offered_masterplan'] = True
         
-        # Initialize Gemini model
-        model = genai.GenerativeModel(GEMINI_MODEL)
-        
-        # Generate response - if we have an image, use it with Claude instead
-        if image_path and os.path.exists(image_path):
-            # Use Claude for image processing
-            assistant_message = process_with_claude(user_message, image_path)
+        # Handle first message scenario
+        is_first_message = session.get('first_message', True)
+        if is_first_message:
+            # For the very first message, we might want to send a welcome message
+            if user_message.strip():
+                # Only mark as not first message if user actually sent content
+                session['first_message'] = False
+                assistant_message = INITIAL_WELCOME
+            else:
+                # Empty first message, still send welcome but keep first_message flag
+                assistant_message = INITIAL_WELCOME
         else:
-            # Use Gemini without image
-            response = model.generate_content(prompt)
-            assistant_message = response.text
+            # Generate response based on whether we have an image
+            assistant_message = ""
+            if image_path and os.path.exists(image_path):
+                # Use Claude for image processing
+                if claude_service.is_configured():
+                    assistant_message = claude_service.process_image(user_message, image_path)
+                else:
+                    assistant_message = "I'm sorry, but I can't process your sketch as the image analysis service is not configured."
+            else:
+                # Use Gemini without image
+                try:
+                    model = genai.GenerativeModel(GEMINI_MODEL)
+                    response = model.generate_content(prompt)
+                    assistant_message = response.text
+                except Exception as e:
+                    logger.error(f"Gemini API error: {str(e)}")
+                    assistant_message = "I'm sorry, I encountered an issue with generating a response. Please try again in a moment."
         
-        # Store in session
+        # Save any session changes
         session.modified = True
         
         # Check if the response contains a masterplan
@@ -263,7 +306,7 @@ def chat():
         response_data = {
             'response': assistant_message,
             'requirements': requirements,
-            'isFirstMessage': session['messages_count'] <= 2
+            'isFirstMessage': is_first_message
         }
         
         # If masterplan is present in the response or in session (and we want to preserve it)
@@ -288,72 +331,6 @@ def chat():
             'requirements': {"agent_type": agent_type, "requirement": "Error occurred"},
             'isFirstMessage': False
         }), 500
-
-def process_with_claude(message, image_path):
-    try:
-        # Get Claude API key from environment
-        claude_api_key = os.environ.get("CLAUDE_API_KEY")
-        if not claude_api_key:
-            logger.error("CLAUDE_API_KEY not set in environment variables")
-            return "I'm sorry, I can't process images without the Claude API being properly configured."
-        
-        # Initialize the Anthropic client
-        client = anthropic.Anthropic(api_key=claude_api_key)
-        
-        # Read the image file and encode it as base64
-        with open(image_path, "rb") as image_file:
-            image_data = base64.b64encode(image_file.read()).decode('utf-8')
-        
-        # Prepare system prompt for sketch analysis
-        system_prompt = """You are a helpful AI assistant that can analyze UI/UX sketches and drawings.
-        When a user provides a sketch, analyze it in detail and describe:
-        1. The overall layout and structure
-        2. The key UI elements you can identify
-        3. The apparent workflow or user journey
-        4. Any design patterns you notice
-        
-        Provide constructive feedback and suggestions for improving the design, keeping in mind 
-        standard UI/UX best practices. Be specific and helpful."""
-        
-        # Call Claude API with the image
-        message = client.messages.create(
-            model="claude-3-7-sonnet-20250219",
-            max_tokens=4000,
-            temperature=0.7,
-            system=system_prompt,
-            messages=[
-                {
-                    "role": "user", 
-                    "content": [
-                        {
-                            "type": "text", 
-                            "text": message
-                        },
-                        {
-                            "type": "image", 
-                            "source": {
-                                "type": "base64", 
-                                "media_type": "image/png", 
-                                "data": image_data
-                            }
-                        }
-                    ]
-                }
-            ]
-        )
-        
-        # Extract the text response
-        response_text = ""
-        for content in message.content:
-            if content.type == "text":
-                response_text += content.text
-        
-        logger.info("Successfully processed image with Claude")
-        return response_text
-    
-    except Exception as e:
-        logger.error(f"Error processing image with Claude: {str(e)}", exc_info=True)
-        return f"I encountered an error while analyzing your sketch: {str(e)}"
 
 def extract_masterplan(text):
     """
@@ -399,34 +376,6 @@ def extract_specialized_content(text, agent_type):
     
     return None
 
-@app.route('/reset', methods=['POST'])
-def reset():
-    try:
-        data = request.json or {}
-        preserve_masterplan = data.get('preserve_masterplan', True)
-        
-        # Store masterplan if we want to preserve it
-        stored_masterplan = None
-        if preserve_masterplan and 'masterplan' in session:
-            stored_masterplan = session['masterplan']
-            logger.info("Preserving masterplan during reset")
-        
-        # Clear session
-        session.clear()
-        
-        # Restore masterplan if needed
-        if preserve_masterplan and stored_masterplan:
-            session['masterplan'] = stored_masterplan
-            logger.info("Restored masterplan after reset")
-        
-        session.modified = True
-        logger.info("Session reset (with masterplan preservation)" if preserve_masterplan else "Session reset (complete)")
-        
-        return jsonify({'status': 'success'})
-    except Exception as e:
-        logger.error(f"Error in reset endpoint: {str(e)}", exc_info=True)
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
 def extract_requirements(user_message, assistant_message, agent_type):
     """
     Simple function to extract potential requirements
@@ -446,6 +395,47 @@ def extract_requirements(user_message, assistant_message, agent_type):
         "requirement": requirement
     }
 
+@app.route('/reset', methods=['POST'])
+def reset():
+    try:
+        data = request.json or {}
+        preserve_masterplan = data.get('preserve_masterplan', True)
+        
+        # Store masterplan if we want to preserve it
+        stored_masterplan = None
+        if preserve_masterplan and 'masterplan' in session:
+            stored_masterplan = session['masterplan']
+            logger.info("Preserving masterplan during reset")
+        
+        # Store session id before clearing
+        session_id = session.get('session_id', str(uuid.uuid4()))
+        
+        # Clear session
+        session.clear()
+        
+        # Restore session id
+        session['session_id'] = session_id
+        
+        # Initialize a new message history
+        session['messages'] = []
+        session['messages_count'] = 0
+        session['first_message'] = True
+        
+        # Restore masterplan if needed
+        if preserve_masterplan and stored_masterplan:
+            session['masterplan'] = stored_masterplan
+            logger.info("Restored masterplan after reset")
+        
+        session.modified = True
+        logger.info(f"Session reset (with masterplan preservation: {preserve_masterplan})")
+        
+        return jsonify({'status': 'success'})
+    except Exception as e:
+        logger.error(f"Error in reset endpoint: {str(e)}", exc_info=True)
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+# The rest of your code (generate-mockups, check-mockup-status, etc.) remains unchanged
+
 @app.route('/generate-mockups', methods=['POST'])
 def generate_mockups():
     try:
@@ -463,97 +453,61 @@ def generate_mockups():
                 'message': 'No masterplan available to generate mockups'
             }), 400
         
-        # Get Claude API key from environment
-        claude_api_key = os.environ.get("CLAUDE_API_KEY")
-        if not claude_api_key:
-            logger.error("CLAUDE_API_KEY not set in environment variables")
-            return jsonify({
-                'success': False,
-                'message': 'Claude API key not configured'
-            }), 500
-        
-        # Initialize the Anthropic client
-        client = anthropic.Anthropic(api_key=claude_api_key)
-        
-        # Prepare sketch descriptions and images
-        image_content = []
-        
-        # Add masterplan as text
-        image_content.append({
-            "type": "text",
-            "text": f"""I need you to create UI/UX mockups for an application based on this masterplan:
-            
-            {masterplan}
-            
-            Please create detailed SVG mockups for the main screens. For each mockup, first describe the screen's purpose,
-            then provide the visual representation using SVG."""
-        })
-        
-        # Add sketch images if provided
-        for i, base64_image in enumerate(sketch_images):
-            try:
-                image_content.append({
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "image/png",
-                        "data": base64_image
-                    }
-                })
-                
-                # Add a description after each image
-                image_content.append({
-                    "type": "text",
-                    "text": f"This is user sketch #{i+1}. Please consider this sketch when designing the mockups."
-                })
-            except Exception as e:
-                logger.error(f"Error adding sketch image {i} to Claude request: {str(e)}")
-        
-        logger.info(f"Calling Claude API to generate mockups with {len(sketch_images)} sketch images")
-        
-        # Create the message using Anthropic client
-        message = client.messages.create(
-            model="claude-3-7-sonnet-20250219",
-            max_tokens=5000,
-            temperature=0.7,
-            system="You are a professional UI/UX designer. Create detailed UI/UX mockups as SVG, be sure to gather and use the correct key aspects of the masterplan, the mockups must be intuitive, and user friendly, be sure that SVG replaces all escaped newlines (\\n) with actual line breaks.",
-            messages=[
-                {
-                    "role": "user", 
-                    "content": image_content
-                }
-            ]
+        # Start a background job using JobManager
+        job_id = JobManager.start_job(
+            'mockup',
+            claude_service.generate_mockups,
+            (masterplan, sketch_images)
         )
         
-        # Process the response
-        mockup_data = []
-        
-        for content_block in message.content:
-            if content_block.type == "text":
-                mockup_data.append({
-                    'type': 'text',
-                    'content': content_block.text
-                })
-            elif content_block.type == "image" and getattr(content_block, "source", {}).get("type") == "svg":
-                mockup_data.append({
-                    'type': 'svg',
-                    'content': content_block.source.data
-                })
-        
-        # Store mockups in session
-        session['mockups'] = mockup_data
+        # Store the job ID in the session
+        session['mockup_job_id'] = job_id
         session.modified = True
         
+        # Return immediately with job ID
         return jsonify({
             'success': True,
-            'mockups': mockup_data
+            'status': 'processing',
+            'job_id': job_id,
+            'message': 'Mockup generation has started in the background.'
         })
+    
     except Exception as e:
-        logger.error(f"Error generating mockups: {str(e)}", exc_info=True)
+        logger.error(f"Error initiating mockup generation: {str(e)}", exc_info=True)
         return jsonify({
             'success': False,
-            'message': f'Error generating mockups: {str(e)}'
+            'message': f'Error initiating mockup generation: {str(e)}'
         }), 500
+
+@app.route('/check-mockup-status', methods=['GET'])
+def check_mockup_status():
+    # Get job ID from request or session
+    job_id = request.args.get('job_id') or session.get('mockup_job_id')
+    
+    if not job_id:
+        return jsonify({
+            'status': 'error',
+            'message': 'No job ID provided or found in session'
+        }), 400
+    
+    # Get the status for this job
+    status = JobManager.get_job_status(job_id)
+    
+    # If the job is completed, store the mockups in the session
+    if status.get('status') == 'completed' and status.get('completed', False):
+        if 'mockups' in status:
+            session['mockups'] = status['mockups']
+            session.modified = True
+            
+            # Return the mockups along with the status
+            return jsonify({
+                'success': True,
+                'status': 'completed',
+                'mockups': status['mockups']
+            })
+    
+    # If not completed, just return the status
+    return jsonify(status)
 
 @app.route('/generate-architecture', methods=['POST'])
 def generate_architecture():
@@ -571,100 +525,95 @@ def generate_architecture():
                 'message': 'No masterplan available to generate architecture diagrams'
             }), 400
         
-        # Get Claude API key from environment
-        claude_api_key = os.environ.get("CLAUDE_API_KEY")
-        if not claude_api_key:
-            logger.error("CLAUDE_API_KEY not set in environment variables")
-            return jsonify({
-                'success': False,
-                'message': 'Claude API key not configured'
-            }), 500
-        
-        # Initialize the Anthropic client
-        client = anthropic.Anthropic(api_key=claude_api_key)
-        
-        # Prepare system prompt
-        system_prompt = """You are a professional software architect specializing in creating clear, informative architecture 
-        diagrams. Create SVG diagrams that illustrate the system architecture based on the masterplan provided.
-        
-        For each diagram:
-        1. First describe the architecture component in detail
-        2. Then provide an SVG diagram representation
-        3. Make sure SVG code is clean and renders properly (replace escaped newlines with actual breaks)
-        4. Include animations where appropriate to illustrate data flow
-        5. Use appropriate colors to differentiate components (frontend, backend, database, etc.)
-        
-        Create multiple diagrams:
-        1. A high-level system architecture overview
-        2. A more detailed component diagram
-        3. A data flow diagram
-        
-        Each SVG should be clear, professional, and help visualize the application structure."""
-        
-        # Create the message content
-        text_content = f"""Based on this masterplan, please create high level architecture diagram for the application, this should be clear, simple and beatiful:
-
-{masterplan}
-
-Please generate an animated SVG diagram that show:
-1. High-level system architecture
-2. Component relationships
-3. Data flow between components
-4. Any important technical details from the masterplan
-
-Each diagram should be accompanied by explanatory text."""
-        
-        # Call the Claude API
-        logger.info("Calling Claude API to generate architecture diagrams")
-        message = client.messages.create(
-            model="claude-3-7-sonnet-20250219",
-            max_tokens=5000,
-            temperature=0.7,
-            system=system_prompt,
-            messages=[
-                {
-                    "role": "user", 
-                    "content": [
-                        {
-                            "type": "text", 
-                            "text": text_content
-                        }
-                    ]
-                }
-            ]
+        # Start a background job
+        job_id = JobManager.start_job(
+            'arch',
+            claude_service.generate_architecture,
+            (masterplan,)
         )
         
-        # Process the response
-        diagram_data = []
-        
-        for content_block in message.content:
-            if content_block.type == "text":
-                diagram_data.append({
-                    'type': 'text',
-                    'content': content_block.text
-                })
-            # Handle SVG content if present
-            elif content_block.type == "image" and getattr(content_block, "source", {}).get("type") == "svg":
-                diagram_data.append({
-                    'type': 'svg',
-                    'content': content_block.source.data
-                })
-        
-        # Store diagrams in session
-        session['architecture_diagrams'] = diagram_data
+        # Store the job ID in the session
+        session['architecture_job_id'] = job_id
         session.modified = True
         
+        # Return immediately with job ID
         return jsonify({
             'success': True,
-            'diagrams': diagram_data
+            'status': 'processing',
+            'job_id': job_id,
+            'message': 'Architecture diagram generation has started in the background.'
         })
+    
     except Exception as e:
-        logger.error(f"Error generating architecture diagrams: {str(e)}", exc_info=True)
+        logger.error(f"Error initiating architecture generation: {str(e)}", exc_info=True)
         return jsonify({
             'success': False,
-            'message': f'Error generating architecture diagrams: {str(e)}'
+            'message': f'Error initiating architecture generation: {str(e)}'
         }), 500
 
+@app.route('/check-architecture-status', methods=['GET'])
+def check_architecture_status():
+    # Get job ID from request or session
+    job_id = request.args.get('job_id') or session.get('architecture_job_id')
+    
+    if not job_id:
+        return jsonify({
+            'status': 'error',
+            'message': 'No job ID provided or found in session'
+        }), 400
+    
+    # Get the status for this job
+    status = JobManager.get_job_status(job_id)
+    
+    # If the job is completed, store the diagrams in the session
+    if status.get('status') == 'completed' and status.get('completed', False):
+        if 'diagrams' in status:
+            session['architecture_diagrams'] = status['diagrams']
+            session.modified = True
+            
+            # Return the diagrams along with the status
+            return jsonify({
+                'success': True,
+                'status': 'completed',
+                'diagrams': status['diagrams']
+            })
+    
+    # If not completed, just return the status
+    return jsonify(status)
+
+# Add a health check endpoint
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({
+        'status': 'healthy', 
+        'timestamp': datetime.now().isoformat(),
+        'version': '1.0'
+    })
+
+# Cleanup job function that runs in a background thread
+def cleanup_job():
+    while True:
+        try:
+            JobManager.clean_old_jobs(max_age_hours=24)
+            logger.info("Cleaned up old job files")
+        except Exception as e:
+            logger.error(f"Error cleaning up old job files: {str(e)}")
+        
+        # Sleep for one hour
+        time.sleep(3600)
+
 if __name__ == '__main__':
-    logger.info("Starting Flask application with Gemini integration - Goal-oriented version")
+    logger.info("Starting Flask application with Gemini and Claude integration")
+    # Check if the CLAUDE_API_KEY is set
+    if os.environ.get("CLAUDE_API_KEY"):
+        logger.info("Claude API service is configured and ready")
+    else:
+        logger.warning("CLAUDE_API_KEY is not set - Claude features will be unavailable")
+    
+    # Initialize the background cleanup job directly
+    cleanup_thread = threading.Thread(target=cleanup_job)
+    cleanup_thread.daemon = True
+    cleanup_thread.start()
+    logger.info("Started background cleanup job")
+    
     app.run(debug=True, port=5000)
